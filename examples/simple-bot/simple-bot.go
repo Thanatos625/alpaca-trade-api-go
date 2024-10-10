@@ -18,7 +18,7 @@ import (
 
 const (
 	windowSize     = 20
-	RSI_windowSize = 14
+	RSI_windowSize = 20
 )
 
 type algo struct {
@@ -28,7 +28,8 @@ type algo struct {
 	feed         marketdata.Feed
 	lastOrder    string
 	stock        string
-	shouldTrade  atomic.Bool
+	shouldBuy    atomic.Bool
+	shouldSell   atomic.Bool
 }
 
 func main() {
@@ -37,8 +38,8 @@ func main() {
 	// apiSecret := "Tr7LC48SRAVoGwesXNd83dU02IRjB3dCDJCjwDnV"
 	// // Change baseURL to https://paper-api.alpaca.markets if you want use paper!
 	// baseURL := "https://api.alpaca.markets"
-	apiKey := ""
-	apiSecret := ""
+	apiKey := "PKQIOCPRHCOXZVY7A2TH"
+	apiSecret := "2OuZlxUbrAlSa4YkqqfhERkrB664KDhk6tPCnPnj"
 	// Change baseURL to https://paper-api.alpaca.markets if you want use paper!
 	baseURL := "https://paper-api.alpaca.markets"
 	// Change feed to sip if you have proper subscription
@@ -113,26 +114,6 @@ func main() {
 		}
 		fmt.Printf("The market is open! Waiting for %s minute bars...\n", a.stock)
 
-		bars, err := a.dataClient.GetBars(a.stock, marketdata.GetBarsRequest{
-			TimeFrame: marketdata.OneMin,
-			Start:     time.Now().Add(-1 * (RSI_windowSize * 2) * time.Minute),
-			End:       time.Now(),
-			Feed:      a.feed,
-		})
-		if err != nil {
-			log.Fatalf("Failed to get historical bar: %v", err)
-		}
-		var closes []float64
-
-		for _, bar := range bars {
-			closes = append(closes, bar.Close)
-		}
-		rsi := talib.Rsi(closes, len(closes)-1)
-		currentRsi := rsi[len(rsi)-1]
-		fmt.Printf("Current RSI: %.2f\n", currentRsi)
-
-		a.shouldTrade.Store(true)
-
 		// During market open we react on the minute bars (onBar)
 
 		clock, err := a.tradeClient.GetClock()
@@ -143,7 +124,10 @@ func main() {
 		time.Sleep(untilClose)
 
 		fmt.Println("Market closing soon. Closing position.")
-		a.shouldTrade.Store(false)
+
+		a.shouldBuy.Store(false)
+		a.shouldSell.Store(true)
+
 		if _, err := a.tradeClient.ClosePosition(a.stock, alpaca.ClosePositionRequest{}); err != nil {
 			log.Fatalf("Failed to close position: %v", a.stock)
 		}
@@ -152,13 +136,43 @@ func main() {
 }
 
 func (a *algo) onBar(bar stream.Bar) {
-	if !a.shouldTrade.Load() {
+
+	bars, err := a.dataClient.GetBars(a.stock, marketdata.GetBarsRequest{
+		TimeFrame: marketdata.OneMin,
+		Start:     time.Now().Add(-1 * (RSI_windowSize) * time.Minute),
+		End:       time.Now(),
+		Feed:      a.feed,
+	})
+	if err != nil {
+		log.Fatalf("Failed to get historical bar: %v", err)
+	}
+	var closes []float64
+
+	for _, bar := range bars {
+		closes = append(closes, bar.Close)
+	}
+	rsi := talib.Rsi(closes, len(closes)-1)
+	currentRsi := rsi[len(rsi)-1]
+	fmt.Printf("Current RSI: %.2f\n", currentRsi)
+
+	if currentRsi < 30 {
+		a.shouldBuy.Store(true)
+		a.shouldSell.Store(false)
+	}
+	if currentRsi > 70 {
+		a.shouldBuy.Store(false)
+		a.shouldSell.Store(true)
+	}
+
+	if !a.shouldSell.Load() && !a.shouldBuy.Load() {
 		return
 	}
 
 	if a.lastOrder != "" {
 		_ = a.tradeClient.CancelOrder(a.lastOrder)
 	}
+
+	a.tryOrder(bar.Close, bar.Close)
 
 	// a.movingAverage.Add(bar.Close)
 	// count := a.movingAverage.Count()
@@ -186,6 +200,74 @@ func (a *algo) awaitMarketOpen() (bool, error) {
 	timeToOpen := int(clock.NextOpen.Sub(clock.Timestamp).Minutes())
 	fmt.Printf("%d minutes until next market open\n", timeToOpen)
 	return false, nil
+}
+
+// start transaction our position after an update.
+func (a *algo) tryOrder(currPrice, avg float64) error {
+	// Get our position, if any.
+	positionQty := 0
+	positionVal := 0.0
+	position, err := a.tradeClient.GetPosition(a.stock)
+	if err != nil {
+		if apiErr, ok := err.(*alpaca.APIError); !ok || apiErr.Message != "position does not exist" {
+			return fmt.Errorf("get position: %w", err)
+		}
+	} else {
+		positionQty = int(position.Qty.IntPart())
+		positionVal, _ = position.MarketValue.Float64()
+	}
+
+	if a.shouldSell.Load() {
+		if positionQty > 0 {
+			fmt.Println("Setting long position to zero")
+			if err := a.submitLimitOrder(positionQty, a.stock, currPrice, "sell"); err != nil {
+				return fmt.Errorf("submit limit order: %v", err)
+			}
+		} else {
+			fmt.Println("Price higher than average, but we have no potision.")
+		}
+	} else if a.shouldBuy.Load() {
+		// Determine optimal amount of shares based on portfolio and market data.
+		account, err := a.tradeClient.GetAccount()
+		if err != nil {
+			return fmt.Errorf("get account: %w", err)
+		}
+		buyingPower, _ := account.BuyingPower.Float64()
+		positions, err := a.tradeClient.GetPositions()
+		if err != nil {
+			return fmt.Errorf("list positions: %w", err)
+		}
+		portfolioVal, _ := account.Cash.Float64()
+		for _, position := range positions {
+			rawVal, _ := position.MarketValue.Float64()
+			portfolioVal += rawVal
+		}
+		portfolioShare := (avg - currPrice) / currPrice * 200
+		targetPositionValue := portfolioVal * portfolioShare
+		amountToAdd := targetPositionValue - positionVal
+
+		// Add to our position, constrained by our buying power; or, sell down to optimal amount of shares.
+		if amountToAdd > 0 {
+			if amountToAdd > buyingPower {
+				amountToAdd = buyingPower
+			}
+			qtyToBuy := int(amountToAdd / currPrice)
+			if err := a.submitLimitOrder(qtyToBuy, a.stock, currPrice, "buy"); err != nil {
+				return fmt.Errorf("submit limit order: %v", err)
+			}
+		}
+		//  else {
+		// 	amountToAdd *= -1
+		// 	qtyToSell := int(amountToAdd / currPrice)
+		// 	if qtyToSell > positionQty {
+		// 		qtyToSell = positionQty
+		// 	}
+		// 	if err := a.submitLimitOrder(qtyToSell, a.stock, currPrice, "sell"); err != nil {
+		// 		return fmt.Errorf("submit limit order: %v", err)
+		// 	}
+		// }
+	}
+	return nil
 }
 
 // Rebalance our position after an update.
