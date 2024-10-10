@@ -155,11 +155,17 @@ func (a *algo) onBar(bar stream.Bar) {
 	currentRsi := rsi[len(rsi)-1]
 	fmt.Printf("Current RSI: %.2f\n", currentRsi)
 
-	if currentRsi < 30 {
+	upperband, _, lowerband := talib.BBands(closes, 5, 2, 2, 0)
+	cupperband := upperband[len(upperband)-1]
+	//cmiddleband := middleband[len(middleband)-1]
+	clowerband := lowerband[len(lowerband)-1]
+	bbb := (bar.Close - clowerband) / (cupperband - clowerband)
+	fmt.Printf("Current BB: %.2f\n", bbb)
+	if currentRsi < 30 && bbb < 0 {
 		a.shouldBuy.Store(true)
 		a.shouldSell.Store(false)
 	}
-	if currentRsi > 70 {
+	if currentRsi > 70 && bbb > 1 {
 		a.shouldBuy.Store(false)
 		a.shouldSell.Store(true)
 	}
