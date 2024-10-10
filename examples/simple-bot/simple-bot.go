@@ -17,7 +17,8 @@ import (
 )
 
 const (
-	windowSize = 20
+	windowSize     = 20
+	RSI_windowSize = 14
 )
 
 type algo struct {
@@ -114,7 +115,7 @@ func main() {
 
 		bars, err := a.dataClient.GetBars(a.stock, marketdata.GetBarsRequest{
 			TimeFrame: marketdata.OneMin,
-			Start:     time.Now().Add(-1 * (windowSize + 1) * time.Minute),
+			Start:     time.Now().Add(-1 * (RSI_windowSize * 2) * time.Minute),
 			End:       time.Now(),
 			Feed:      a.feed,
 		})
@@ -126,7 +127,7 @@ func main() {
 		for _, bar := range bars {
 			closes = append(closes, bar.Close)
 		}
-		rsi := talib.Rsi(closes, 7)
+		rsi := talib.Rsi(closes, len(closes)-1)
 		currentRsi := rsi[len(rsi)-1]
 		fmt.Printf("Current RSI: %.2f\n", currentRsi)
 
