@@ -43,7 +43,7 @@ func main() {
 	// Change feed to sip if you have proper subscription
 	feed := "iex"
 
-	symbol := "NDAQ"
+	symbol := "AAPL"
 	if len(os.Args) > 1 {
 		symbol = os.Args[1]
 	}
@@ -106,6 +106,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to wait for market open: %v", err)
 		}
+
 		if !isOpen {
 			time.Sleep(1 * time.Minute)
 			continue
@@ -137,7 +138,7 @@ func (a *algo) onBar(bar stream.Bar) {
 
 	closes := getBars(a)
 
-	checkIndicatros(closes, bar, a)
+	checkIndicators(closes, bar, a)
 
 	// if !a.shouldSell.Load() && !a.shouldBuy.Load() {
 	// 	return
@@ -162,9 +163,30 @@ func (a *algo) onBar(bar stream.Bar) {
 	// 	fmt.Println("Failed to rebalance:", err)
 	// }
 }
+func getLastNElements(closes []float64, n int) ([]float64, error) {
+	if n <= 0 {
+		return nil, fmt.Errorf("n must be a positive integer")
+	}
 
-func checkIndicatros(closes []float64, bar stream.Bar, a *algo) {
-	rsi := talib.Rsi(closes, len(closes)-1)
+	lenCloses := len(closes)
+	if lenCloses == 0 {
+		return nil, fmt.Errorf("closes slice is empty") // Or return an empty slice: return []float64{}, nil
+	}
+
+	if n > lenCloses {
+		return closes, nil // Return the whole slice instead of an error
+
+	}
+	startIndex := lenCloses - n
+	lastNElements := closes[startIndex:]
+
+	return lastNElements, nil
+}
+
+func checkIndicators(closes []float64, bar stream.Bar, a *algo) {
+
+	lastNElements, _ := getLastNElements(closes, 14)
+	rsi := talib.Rsi(lastNElements, len(lastNElements)-1)
 	currentRsi := rsi[len(rsi)-1]
 	fmt.Printf("Current RSI: %.2f\n", currentRsi)
 
@@ -178,7 +200,8 @@ func checkIndicatros(closes []float64, bar stream.Bar, a *algo) {
 	i := len(macd) - 1
 	macdBuy := macd[i] > macdSignal[i] && macd[i-1] < macdSignal[i-1]
 	macdSell := macd[i] < macdSignal[i] && macd[i-1] > macdSignal[i-1]
-
+	a.longOrder.Store(true)
+	fmt.Printf("Current MACD: %.2f %.2f\n", macd[i], macdSignal[i])
 	if currentRsi < 30 && bbb < 0 && macdBuy {
 		a.longOrder.Store(true)
 		a.shortOrder.Store(false)
