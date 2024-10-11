@@ -38,8 +38,7 @@ func main() {
 	// apiSecret := "Tr7LC48SRAVoGwesXNd83dU02IRjB3dCDJCjwDnV"
 	// // Change baseURL to https://paper-api.alpaca.markets if you want use paper!
 	// baseURL := "https://api.alpaca.markets"
-	apiKey := "PKQIOCPRHCOXZVY7A2TH"
-	apiSecret := "2OuZlxUbrAlSa4YkqqfhERkrB664KDhk6tPCnPnj"
+
 	// Change baseURL to https://paper-api.alpaca.markets if you want use paper!
 	baseURL := "https://paper-api.alpaca.markets"
 	// Change feed to sip if you have proper subscription
