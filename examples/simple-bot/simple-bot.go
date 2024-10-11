@@ -17,8 +17,7 @@ import (
 )
 
 const (
-	windowSize     = 20
-	RSI_windowSize = 20
+	windowSize = 30
 )
 
 type algo struct {
@@ -28,8 +27,8 @@ type algo struct {
 	feed         marketdata.Feed
 	lastOrder    string
 	stock        string
-	shouldBuy    atomic.Bool
-	shouldSell   atomic.Bool
+	longOrder    atomic.Bool
+	shortOrder   atomic.Bool
 }
 
 func main() {
@@ -124,8 +123,8 @@ func main() {
 
 		fmt.Println("Market closing soon. Closing position.")
 
-		a.shouldBuy.Store(false)
-		a.shouldSell.Store(true)
+		a.longOrder.Store(false)
+		a.shortOrder.Store(false)
 
 		if _, err := a.tradeClient.ClosePosition(a.stock, alpaca.ClosePositionRequest{}); err != nil {
 			log.Fatalf("Failed to close position: %v", a.stock)
@@ -136,48 +135,19 @@ func main() {
 
 func (a *algo) onBar(bar stream.Bar) {
 
-	bars, err := a.dataClient.GetBars(a.stock, marketdata.GetBarsRequest{
-		TimeFrame: marketdata.OneMin,
-		Start:     time.Now().Add(-1 * (RSI_windowSize) * time.Minute),
-		End:       time.Now(),
-		Feed:      a.feed,
-	})
-	if err != nil {
-		log.Fatalf("Failed to get historical bar: %v", err)
-	}
-	var closes []float64
+	closes := getBars(a)
 
-	for _, bar := range bars {
-		closes = append(closes, bar.Close)
-	}
-	rsi := talib.Rsi(closes, len(closes)-1)
-	currentRsi := rsi[len(rsi)-1]
-	fmt.Printf("Current RSI: %.2f\n", currentRsi)
+	checkIndicatros(closes, bar, a)
 
-	upperband, _, lowerband := talib.BBands(closes, 5, 2, 2, 0)
-	cupperband := upperband[len(upperband)-1]
-	//cmiddleband := middleband[len(middleband)-1]
-	clowerband := lowerband[len(lowerband)-1]
-	bbb := (bar.Close - clowerband) / (cupperband - clowerband)
-	fmt.Printf("Current BB: %.2f\n", bbb)
-	if currentRsi < 30 && bbb < 0 {
-		a.shouldBuy.Store(true)
-		a.shouldSell.Store(false)
-	}
-	if currentRsi > 70 && bbb > 1 {
-		a.shouldBuy.Store(false)
-		a.shouldSell.Store(true)
-	}
-
-	if !a.shouldSell.Load() && !a.shouldBuy.Load() {
-		return
-	}
+	// if !a.shouldSell.Load() && !a.shouldBuy.Load() {
+	// 	return
+	// }
 
 	if a.lastOrder != "" {
 		_ = a.tradeClient.CancelOrder(a.lastOrder)
 	}
 
-	a.tryOrder(bar.Close, bar.Close)
+	a.applyIndicators(bar.Close, bar.Close)
 
 	// a.movingAverage.Add(bar.Close)
 	// count := a.movingAverage.Count()
@@ -191,6 +161,51 @@ func (a *algo) onBar(bar stream.Bar) {
 	// if err := a.rebalance(bar.Close, avg); err != nil {
 	// 	fmt.Println("Failed to rebalance:", err)
 	// }
+}
+
+func checkIndicatros(closes []float64, bar stream.Bar, a *algo) {
+	rsi := talib.Rsi(closes, len(closes)-1)
+	currentRsi := rsi[len(rsi)-1]
+	fmt.Printf("Current RSI: %.2f\n", currentRsi)
+
+	upperband, _, lowerband := talib.BBands(closes, 5, 2, 2, 0)
+	cupperband := upperband[len(upperband)-1]
+	clowerband := lowerband[len(lowerband)-1]
+	bbb := (bar.Close - clowerband) / (cupperband - clowerband)
+	fmt.Printf("Current BB: %.2f\n", bbb)
+
+	macd, macdSignal, _ := talib.Macd(closes, 12, 26, 9)
+	i := len(macd) - 1
+	macdBuy := macd[i] > macdSignal[i] && macd[i-1] < macdSignal[i-1]
+	macdSell := macd[i] < macdSignal[i] && macd[i-1] > macdSignal[i-1]
+
+	if currentRsi < 30 && bbb < 0 && macdBuy {
+		a.longOrder.Store(true)
+		a.shortOrder.Store(false)
+	}
+	if currentRsi > 70 && bbb > 1 && macdSell {
+		a.longOrder.Store(false)
+		a.shortOrder.Store(true)
+	}
+}
+
+func getBars(a *algo) []float64 {
+	bars, err := a.dataClient.GetBars(a.stock, marketdata.GetBarsRequest{
+		TimeFrame: marketdata.OneMin,
+		Start:     time.Now().Add(-1 * (windowSize) * time.Minute),
+		End:       time.Now(),
+		Feed:      a.feed,
+	})
+	if err != nil {
+		log.Fatalf("Failed to get historical bar: %v", err)
+	}
+
+	var closes []float64
+
+	for _, bar := range bars {
+		closes = append(closes, bar.Close)
+	}
+	return closes
 }
 
 // Spin until the market is open.
@@ -208,7 +223,7 @@ func (a *algo) awaitMarketOpen() (bool, error) {
 }
 
 // start transaction our position after an update.
-func (a *algo) tryOrder(currPrice, avg float64) error {
+func (a *algo) applyIndicators(currPrice, avg float64) error {
 	// Get our position, if any.
 	positionQty := 0
 	positionVal := 0.0
@@ -222,7 +237,7 @@ func (a *algo) tryOrder(currPrice, avg float64) error {
 		positionVal, _ = position.MarketValue.Float64()
 	}
 
-	if a.shouldSell.Load() {
+	if a.shortOrder.Load() {
 		if positionQty > 0 {
 			fmt.Println("Setting long position to zero")
 			if err := a.submitLimitOrder(positionQty, a.stock, currPrice, "sell"); err != nil {
@@ -231,7 +246,7 @@ func (a *algo) tryOrder(currPrice, avg float64) error {
 		} else {
 			fmt.Println("Price higher than average, but we have no potision.")
 		}
-	} else if a.shouldBuy.Load() {
+	} else if a.longOrder.Load() {
 		// Determine optimal amount of shares based on portfolio and market data.
 		account, err := a.tradeClient.GetAccount()
 		if err != nil {
